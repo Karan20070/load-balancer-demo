@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Load Balancer Dashboard</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --text:#1c2330; --muted:#6b7587; --line:#e2e5ea; --ok:#1f9d55; --bad:#d64545; --accent:#3b6df0; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f141b; --card:#18202b; --text:#e6eaf0; --muted:#8c97a8; --line:#2a3442; --ok:#3ecf7a; --bad:#ef6b6b; --accent:#6f95ff; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); padding:20px; }
+  h1 { font-size:20px; margin:0 0 16px; }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  .controls { display:flex; flex-wrap:wrap; gap:18px; align-items:center; }
+  label { font-size:13px; color:var(--muted); display:flex; align-items:center; gap:8px; }
+  select, button { font:inherit; padding:6px 10px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--text); cursor:pointer; }
+  .stats { margin-left:auto; font-size:13px; color:var(--muted); }
+  .stats b { color:var(--text); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:14px; margin-bottom:14px; }
+  .card h3 { margin:0 0 8px; font-size:15px; display:flex; align-items:center; gap:8px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--ok); }
+  .down .dot { background:var(--bad); } .down { opacity:.6; }
+  .bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; margin:6px 0 10px; }
+  .bar > div { height:100%; background:var(--accent); transition:width .4s; }
+  .row { display:flex; justify-content:space-between; font-size:13px; color:var(--muted); margin:2px 0; }
+  .row b { color:var(--text); font-weight:600; }
+  canvas { width:100%; height:240px; display:block; }
+  .legend { display:flex; gap:14px; font-size:12px; color:var(--muted); margin-top:8px; flex-wrap:wrap; }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; }
+</style>
+</head>
+<body>
+<h1>Load Balancer Dashboard</h1>
+
+<div class="panel controls">
+  <label>Algorithm <select id="algo"></select></label>
+  <label>Traffic <input type="range" id="rps" min="0" max="200" value="20"> <b id="rpsVal">20</b> req/s</label>
+  <button id="reset">Reset counters</button>
+  <div class="stats">Sent: <b id="sent">0</b> · Failed: <b id="failed">0</b></div>
+</div>
+
+<div class="grid" id="servers"></div>
+
+<div class="panel">
+  <div style="font-size:13px;color:var(--muted);margin-bottom:8px">Requests per second per server (last 60s)</div>
+  <canvas id="chart"></canvas>
+  <div class="legend" id="legend"></div>
+</div>
+
+<script>
+const COLORS = ['#3b6df0', '#e8833a', '#1f9d55', '#a855f7'];
+const $ = (id) => document.getElementById(id);
+const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+let last = null, ready = false;
+
+$('algo').onchange = (e) => post('/api/algorithm', { algorithm: e.target.value });
+$('rps').oninput = (e) => { $('rpsVal').textContent = e.target.value; post('/api/rps', { rps: +e.target.value }); };
+$('reset').onclick = () => post('/api/reset');
+$('servers').onclick = (e) => { const id = e.target.dataset.toggle; if (id !== undefined) post(`/api/servers/${id}/toggle`); };
+
+new EventSource('/events').onmessage = (e) => { last = JSON.parse(e.data); render(last); };
+
+function render(d) {
+  if (!ready) {
+    $('algo').innerHTML = d.algorithms.map((a) => `<option>${a}</option>`).join('');
+    $('rps').value = d.rps; $('rpsVal').textContent = d.rps;
+    $('legend').innerHTML = d.servers.map((s) => `<span><i style="background:${COLORS[s.id % 4]}"></i>${s.name}</span>`).join('');
+    ready = true;
+  }
+  $('algo').value = d.algorithm;
+  $('sent').textContent = d.sent; $('failed').textContent = d.failed;
+  const sum = d.servers.reduce((t, s) => t + s.total, 0) || 1;
+  $('servers').innerHTML = d.servers.map((s) => `
+    <div class="panel card ${s.healthy ? '' : 'down'}">
+      <h3><span class="dot"></span>${s.name} <small style="color:var(--muted);font-weight:400">weight ${s.weight}</small></h3>
+      <div class="row"><span>Active connections</span><b>${s.active} / ${s.capacity}</b></div>
+      <div class="bar"><div style="width:${Math.min(100, s.active / s.capacity * 100)}%"></div></div>
+      <div class="row"><span>Requests/sec</span><b>${s.rps}</b></div>
+      <div class="row"><span>Handled</span><b>${s.total} (${Math.round(s.total / sum * 100)}%)</b></div>
+      <div class="row"><span>Rejected (503)</span><b>${s.errors}</b></div>
+      <div class="row"><span>Avg latency</span><b>${s.avgLatency} ms</b></div>
+      <button data-toggle="${s.id}" style="margin-top:8px;width:100%">${s.healthy ? 'Take down' : 'Bring up'}</button>
+    </div>`).join('');
+  drawChart(d.servers);
+}
+
+function drawChart(list) {
+  const c = $('chart'), dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  c.width = w * dpr; c.height = h * dpr;
+  const g = c.getContext('2d'); g.scale(dpr, dpr);
+  const css = getComputedStyle(document.body);
+  const max = Math.max(10, ...list.flatMap((s) => s.history)) * 1.1;
+  const pad = { l: 34, b: 18, t: 6, r: 6 };
+  g.font = '11px system-ui'; g.fillStyle = css.getPropertyValue('--muted'); g.strokeStyle = css.getPropertyValue('--line');
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + (h - pad.t - pad.b) * (1 - i / 4);
+    g.beginPath(); g.moveTo(pad.l, y); g.lineTo(w - pad.r, y); g.stroke();
+    g.fillText(Math.round(max * i / 4), 2, y + 4);
+  }
+  list.forEach((s) => {
+    g.strokeStyle = COLORS[s.id % 4]; g.lineWidth = 2; g.beginPath();
+    s.history.forEach((v, i) => {
+      const xx = pad.l + (w - pad.l - pad.r) * ((60 - s.history.length + i) / 59);
+      const y = pad.t + (h - pad.t - pad.b) * (1 - v / max);
+      i ? g.lineTo(xx, y) : g.moveTo(xx, y);
+    });
+    g.stroke();
+  });
+}
+window.onresize = () => last && drawChart(last.servers);
+</script>
+</body>
+</html>
