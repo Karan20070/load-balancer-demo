@@ -7,7 +7,7 @@ No dependencies. Requires Node.js 18+.
 ## Run
 
 ```bash
-git clone https://github.com/<your-username>/load-balancer-demo.git
+git clone https://github.com/Karan20070/load-balancer-demo.git
 cd load-balancer-demo
 npm start
 ```
